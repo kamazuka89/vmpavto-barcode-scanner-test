@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ВМПАВТО — Тест сканера мелких EAN-13</title>
+  <meta name="theme-color" content="#172033">
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, -apple-system, sans-serif; }
+    body { margin: 0; padding: max(18px, env(safe-area-inset-top)) 16px 32px; background: var(--tg-theme-bg-color, #f7f8fa); color: var(--tg-theme-text-color, #172033); }
+    main { max-width: 520px; margin: auto; }
+    h1 { font-size: 23px; margin: 8px 0; }
+    p { line-height: 1.5; color: var(--tg-theme-hint-color, #617084); }
+    #reader { min-height: 160px; border-radius: 14px; overflow: hidden; background: #111c2b; }
+    #reader video { border-radius: 14px; }
+    .actions { display: grid; gap: 12px; margin-top: 16px; }
+    button, input { font: inherit; border-radius: 10px; padding: 14px; }
+    button { border: 0; background: var(--tg-theme-button-color, #2586dd); color: var(--tg-theme-button-text-color, white); font-weight: 650; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    input { border: 1px solid #9ba9b7; background: var(--tg-theme-secondary-bg-color, #fff); color: inherit; width: 100%; box-sizing: border-box; }
+    label { display: block; margin-bottom: 5px; font-weight: 600; }
+    #status { min-height: 44px; margin-top: 12px; }
+    .secondary { background: transparent; color: var(--tg-theme-text-color, #172033); border: 1px solid #9ba9b7; }
+  </style>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+<main>
+  <h1>Тест улучшенного сканера</h1>
+  <p>Наведите камеру на мелкий EAN-13. Это тест: распознанный код показывается на экране и <strong>не отправляется боту</strong>.</p>
+  <div id="reader" aria-label="Камера для сканирования штрихкода"></div>
+  <div class="actions">
+    <button type="button" id="start">Включить камеру</button>
+    <button type="button" id="stop" class="secondary" disabled>Остановить камеру</button>
+    <button type="button" id="zoom" class="secondary" hidden>🔎 Приблизить</button>
+    <div>
+      <label for="code">Или введите 13 цифр вручную</label>
+      <input id="code" inputmode="numeric" pattern="[0-9]{13}" maxlength="13" autocomplete="off" placeholder="4607030112442">
+    </div>
+    <button type="button" id="submit">Проверить введённый код</button>
+  </div>
+  <p role="status" aria-live="polite" id="status">Нажмите «Включить камеру».</p>
+</main>
+<script>
+(function () {
+  "use strict";
+  const app = window.Telegram && window.Telegram.WebApp;
+  const status = document.getElementById("status");
+  const startButton = document.getElementById("start");
+  const stopButton = document.getElementById("stop");
+  const submitButton = document.getElementById("submit");
+  const zoomButton = document.getElementById("zoom");
+  const input = document.getElementById("code");
+  let scanner = null;
+  let active = false;
+  let sent = false;
+  let pendingResult = null;
+  let scanStartedAt = null;
+  let zoomBase = 1;
+  let zoomTarget = 1;
+  let zoomApplied = false;
+
+  if (app) { app.ready(); app.expand(); }
+
+  function message(text) { status.textContent = text; }
+  function validEAN(text) {
+    if (!/^[0-9]{13}$/.test(text)) return false;
+    let sum = 0;
+    for (let i = 0; i < 12; i++) sum += Number(text[i]) * (i % 2 ? 3 : 1);
+    return ((10 - (sum % 10)) % 10) === Number(text[12]);
+  }
+  async function stopCamera() {
+    if (!scanner || !active) return;
+    try { await scanner.stop(); } catch (_) { /* camera may already be closed */ }
+    active = false;
+    startButton.disabled = false;
+    stopButton.disabled = true;
+    zoomButton.hidden = true;
+    scanStartedAt = null;
+  }
+  async function submit(raw) {
+    const ean = String(raw || "").trim();
+    if (!validEAN(ean)) {
+      message("Нужен корректный EAN-13: 13 цифр и правильная контрольная цифра.");
+      return;
+    }
+    if (sent) return;
+    sent = true;
+    submitButton.disabled = true;
+    const elapsed = scanStartedAt === null
+      ? ""
+      : " — " + ((performance.now() - scanStartedAt) / 1000).toFixed(1) + " сек.";
+    await stopCamera();
+    input.value = ean;
+    message("✅ Распознано: " + ean + elapsed + ". Это тест: данные боту не отправлены.");
+  }
+
+  function showZoomIfAvailable() {
+    zoomButton.hidden = true;
+    if (!scanner || typeof scanner.getRunningTrackCapabilities !== "function" ||
+        typeof scanner.applyVideoConstraints !== "function") return;
+    try {
+      const caps = scanner.getRunningTrackCapabilities();
+      const range = caps && caps.zoom;
+      if (!range || !Number.isFinite(range.min) || !Number.isFinite(range.max) ||
+          range.max <= range.min) return;
+      zoomBase = Math.max(1, range.min);
+      zoomTarget = Math.min(range.max, Math.max(zoomBase + 0.5, zoomBase * 1.5));
+      if (zoomTarget <= zoomBase || zoomTarget > range.max) return;
+      zoomApplied = false;
+      zoomButton.textContent = "🔎 Приблизить";
+      zoomButton.hidden = false;
+    } catch (_) { /* Zoom is an optional browser capability. */ }
+  }
+
+  async function toggleZoom() {
+    if (!active || !scanner || zoomButton.disabled) return;
+    zoomButton.disabled = true;
+    const next = zoomApplied ? zoomBase : zoomTarget;
+    try {
+      await scanner.applyVideoConstraints({ advanced: [{ zoom: next }] });
+      zoomApplied = !zoomApplied;
+      zoomButton.textContent = zoomApplied ? "🔎 Без увеличения" : "🔎 Приблизить";
+      message(zoomApplied
+        ? "Приближение включено. Держите штрихкод в фокусе."
+        : "Приближение выключено. Наведите камеру на штрихкод.");
+    } catch (_) {
+      zoomButton.hidden = true;
+      message("Управление приближением недоступно на этой камере.");
+    } finally { zoomButton.disabled = false; }
+  }
+
+  async function startCamera() {
+    if (active || sent) return;
+    if (typeof window.Html5Qrcode !== "function") {
+      message("Сканер недоступен. Введите EAN-13 вручную.");
+      return;
+    }
+    if (!window.isSecureContext) {
+      message("Для камеры требуется HTTPS. Введите EAN-13 вручную.");
+      return;
+    }
+    try {
+      scanner = scanner || new window.Html5Qrcode("reader", {
+        formatsToSupport: [window.Html5QrcodeSupportedFormats.EAN_13],
+        verbose: false
+      });
+      startButton.disabled = true;
+      message("Разрешите доступ к камере и наведите её на штрихкод.");
+      const scanConfig = {
+        fps: 15,
+        disableFlip: true,
+        qrbox: (width, height) => {
+          const boxWidth = Math.max(80, Math.min(width - 8, 380, Math.floor(width * 0.92)));
+          const boxHeight = Math.max(60, Math.min(height - 8, Math.floor(boxWidth * 0.45)));
+          return { width: boxWidth, height: boxHeight };
+        }
+      };
+      const onDecoded = (decoded) => {
+        if (validEAN(decoded) && !sent) {
+          input.value = decoded;
+          if (active) void submit(decoded);
+          else pendingResult = decoded;
+        }
+      };
+      try {
+        await scanner.start(
+          { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+          scanConfig, onDecoded, () => {}
+        );
+      } catch (highResolutionError) {
+        // Some embedded browsers reject extra camera constraints. Preserve fallback.
+        await scanner.start(
+          { facingMode: "environment" },
+          scanConfig, onDecoded, () => {}
+        );
+      }
+      active = true;
+      stopButton.disabled = false;
+      scanStartedAt = performance.now();
+      showZoomIfAvailable();
+      if (pendingResult) {
+        const decoded = pendingResult;
+        pendingResult = null;
+        await submit(decoded);
+      }
+    } catch (_) {
+      active = false;
+      startButton.disabled = false;
+      message("Не удалось открыть камеру. Проверьте разрешения либо введите EAN-13 вручную.");
+    }
+  }
+  startButton.addEventListener("click", () => { void startCamera(); });
+  stopButton.addEventListener("click", () => { void stopCamera(); });
+  zoomButton.addEventListener("click", () => { void toggleZoom(); });
+  submitButton.addEventListener("click", () => { void submit(input.value); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) void stopCamera();
+  });
+})();
+</script>
+</body>
+</html>
