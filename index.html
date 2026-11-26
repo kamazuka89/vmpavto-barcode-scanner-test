@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ВМПАВТО — Сканер EAN-13</title>
+  <meta name="theme-color" content="#172033">
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, -apple-system, sans-serif; }
+    body { margin: 0; padding: max(18px, env(safe-area-inset-top)) 16px 32px; background: var(--tg-theme-bg-color, #f7f8fa); color: var(--tg-theme-text-color, #172033); }
+    main { max-width: 520px; margin: auto; }
+    h1 { font-size: 23px; margin: 8px 0; }
+    p { line-height: 1.5; color: var(--tg-theme-hint-color, #617084); }
+    #reader { min-height: 160px; border-radius: 14px; overflow: hidden; background: #111c2b; }
+    #reader video { border-radius: 14px; }
+    .actions { display: grid; gap: 12px; margin-top: 16px; }
+    button, input { font: inherit; border-radius: 10px; padding: 14px; }
+    button { border: 0; background: var(--tg-theme-button-color, #2586dd); color: var(--tg-theme-button-text-color, white); font-weight: 650; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    input { border: 1px solid #9ba9b7; background: var(--tg-theme-secondary-bg-color, #fff); color: inherit; width: 100%; box-sizing: border-box; }
+    label { display: block; margin-bottom: 5px; font-weight: 600; }
+    #status { min-height: 44px; margin-top: 12px; }
+    .secondary { background: transparent; color: var(--tg-theme-text-color, #172033); border: 1px solid #9ba9b7; }
+  </style>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+<main>
+  <h1>Сканирование товара</h1>
+  <p>Наведите камеру на EAN-13 упаковки ВМПАВТО. Код не отправляется сторонним сервисам; обработка выполняется на телефоне.</p>
+  <div id="reader" aria-label="Камера для сканирования штрихкода"></div>
+  <div class="actions">
+    <button type="button" id="start">Включить камеру</button>
+    <button type="button" id="stop" class="secondary" disabled>Остановить камеру</button>
+    <div>
+      <label for="code">Или введите 13 цифр вручную</label>
+      <input id="code" inputmode="numeric" pattern="[0-9]{13}" maxlength="13" autocomplete="off" placeholder="4607030112442">
+    </div>
+    <button type="button" id="submit">Найти товар</button>
+  </div>
+  <p role="status" aria-live="polite" id="status">Нажмите «Включить камеру».</p>
+</main>
+<script>
+(function () {
+  "use strict";
+  const app = window.Telegram && window.Telegram.WebApp;
+  const status = document.getElementById("status");
+  const startButton = document.getElementById("start");
+  const stopButton = document.getElementById("stop");
+  const submitButton = document.getElementById("submit");
+  const input = document.getElementById("code");
+  let scanner = null;
+  let active = false;
+  let sent = false;
+  let pendingResult = null;
+
+  if (app) { app.ready(); app.expand(); }
+
+  function message(text) { status.textContent = text; }
+  function validEAN(text) {
+    if (!/^[0-9]{13}$/.test(text)) return false;
+    let sum = 0;
+    for (let i = 0; i < 12; i++) sum += Number(text[i]) * (i % 2 ? 3 : 1);
+    return ((10 - (sum % 10)) % 10) === Number(text[12]);
+  }
+  async function stopCamera() {
+    if (!scanner || !active) return;
+    try { await scanner.stop(); } catch (_) { /* camera may already be closed */ }
+    active = false;
+    startButton.disabled = false;
+    stopButton.disabled = true;
+  }
+  async function submit(raw) {
+    const ean = String(raw || "").trim();
+    if (!validEAN(ean)) {
+      message("Нужен корректный EAN-13: ровно 13 цифр с верной контрольной цифрой.");
+      return;
+    }
+    if (sent) return;
+    if (!app || typeof app.sendData !== "function") {
+      message("Откройте сканер из Telegram через кнопку бота /scan.");
+      return;
+    }
+    sent = true;
+    submitButton.disabled = true;
+    await stopCamera();
+    try {
+      app.sendData(JSON.stringify({ type: "ean13", ean13: ean }));
+      message("Штрихкод отправлен боту. Вернитесь в чат.");
+    } catch (_) {
+      sent = false;
+      submitButton.disabled = false;
+      message("Не удалось отправить код. Повторите попытку из Telegram.");
+    }
+  }
+  async function startCamera() {
+    if (active || sent) return;
+    if (typeof window.Html5Qrcode !== "function") {
+      message("Сканер недоступен. Введите EAN-13 вручную.");
+      return;
+    }
+    if (!window.isSecureContext) {
+      message("Для камеры требуется HTTPS. Введите EAN-13 вручную.");
+      return;
+    }
+    try {
+      scanner = scanner || new window.Html5Qrcode("reader", {
+        formatsToSupport: [window.Html5QrcodeSupportedFormats.EAN_13],
+        verbose: false
+      });
+      startButton.disabled = true;
+      message("Разрешите доступ к камере и наведите её на штрихкод.");
+      await scanner.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 260, height: 130 } },
+        (decoded) => {
+          if (validEAN(decoded) && !sent) {
+            input.value = decoded;
+            if (active) void submit(decoded);
+            else pendingResult = decoded;
+          }
+        },
+        () => {}
+      );
+      active = true;
+      stopButton.disabled = false;
+      if (pendingResult) {
+        const decoded = pendingResult;
+        pendingResult = null;
+        await submit(decoded);
+      }
+    } catch (_) {
+      active = false;
+      startButton.disabled = false;
+      message("Не удалось открыть камеру. Проверьте разрешения либо введите EAN-13 вручную.");
+    }
+  }
+  startButton.addEventListener("click", () => { void startCamera(); });
+  stopButton.addEventListener("click", () => { void stopCamera(); });
+  submitButton.addEventListener("click", () => { void submit(input.value); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) void stopCamera();
+  });
+})();
+</script>
+</body>
+</html>
