@@ -148,34 +148,26 @@
       });
       startButton.disabled = true;
       message("Разрешите доступ к камере и наведите её на штрихкод.");
+      // Start with the same camera options as the proven production scanner.
+      // The previous v2 attempt requested extra high-resolution constraints
+      // before opening the camera; some Telegram webviews reject those.
+      // Keep higher decode frequency and optional hardware zoom.
       const scanConfig = {
         fps: 15,
-        disableFlip: true,
-        qrbox: (width, height) => {
-          const boxWidth = Math.max(80, Math.min(width - 8, 380, Math.floor(width * 0.92)));
-          const boxHeight = Math.max(60, Math.min(height - 8, Math.floor(boxWidth * 0.45)));
-          return { width: boxWidth, height: boxHeight };
-        }
+        qrbox: { width: 260, height: 130 }
       };
-      const onDecoded = (decoded) => {
-        if (validEAN(decoded) && !sent) {
-          input.value = decoded;
-          if (active) void submit(decoded);
-          else pendingResult = decoded;
-        }
-      };
-      try {
-        await scanner.start(
-          { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
-          scanConfig, onDecoded, () => {}
-        );
-      } catch (highResolutionError) {
-        // Some embedded browsers reject extra camera constraints. Preserve fallback.
-        await scanner.start(
-          { facingMode: "environment" },
-          scanConfig, onDecoded, () => {}
-        );
-      }
+      await scanner.start(
+        { facingMode: "environment" },
+        scanConfig,
+        (decoded) => {
+          if (validEAN(decoded) && !sent) {
+            input.value = decoded;
+            if (active) void submit(decoded);
+            else pendingResult = decoded;
+          }
+        },
+        () => {}
+      );
       active = true;
       stopButton.disabled = false;
       scanStartedAt = performance.now();
@@ -185,10 +177,13 @@
         pendingResult = null;
         await submit(decoded);
       }
-    } catch (_) {
+    } catch (error) {
       active = false;
       startButton.disabled = false;
-      message("Не удалось открыть камеру. Проверьте разрешения либо введите EAN-13 вручную.");
+      stopButton.disabled = true;
+      const detail = error && error.message ? error.message : String(error || "неизвестная ошибка");
+      message("Не удалось открыть камеру: " + detail.slice(0, 180) +
+        ". Проверьте разрешения камеры. Можно ввести EAN-13 вручную.");
     }
   }
   startButton.addEventListener("click", () => { void startCamera(); });
