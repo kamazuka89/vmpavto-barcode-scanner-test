@@ -1,0 +1,1 @@
+# vmpavto-barcode-scanner-test
